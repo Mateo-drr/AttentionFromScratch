@@ -65,11 +65,11 @@ class LayerNorm(nn.Module):
         
 class FeedForwardBlock(nn.Module):
     
-    def __init__(self, dModel: int, dFf: int, dropout: float):
+    def __init__(self, dModel: int, hidSize: int, dropout: float):
         super().__init__()
-        self.lin1 = nn.Linear(dModel, dFf)
+        self.lin1 = nn.Linear(dModel, hidSize)
         self.dropout = nn.Dropout(dropout)
-        self.lin2 = nn.Linear(dFf, dModel)
+        self.lin2 = nn.Linear(hidSize, dModel)
         self.actfunc = nn.ReLU(inplace=True)
         
     def forward(self,x):
@@ -146,20 +146,158 @@ class Residual(nn.Module):
         self.dropout = nn.Dropout()
         self.norm = LayerNorm()
         
-    def forward(self, x, prevLayer):
-        return x + self.dropout(self.norm(prevLayer(x))) #his implementation puts norm first
+    def forward(self, x, prevLayerX):
+        #return x + self.dropout(self.norm(prevLayer(x))) #his implementation puts norm first
+        return x + self.dropout(self.norm(prevLayerX))
+    
+class EncoderBlock(nn.Module):
+
+    def __init__(self, selfAttention: MultiHeadAttentionBlock, feedForward: FeedForwardBlock, dropout: float):
+        super().__init__()
+        self.selfAttention = selfAttention
+        self.feedForward = feedForward
+        self.residual = nn.ModuleList([Residual(dropout), Residual(dropout)])
+        
+    def forward(self,x,srcMask):
+        
+        x1 = self.selfAttention(q=x,k=x,v=x, mask=srcMask) #self attention
+        x = self.residual[0](x, x1)
+        
+        x1 = self.feedForward(x)
+        x = self.residual[1](x,x1)
+        
+class DecodeBlock(nn.Module):
+
+    def __init__(self, selfAttention: MultiHeadAttentionBlock,
+                 crossAttention: MultiHeadAttentionBlock,
+                 feedForward: FeedForwardBlock,
+                 dropout: float):
+        super().__init__()
+        self.selfAttention = selfAttention
+        self.crossAttention = crossAttention
+        self.feedForward = feedForward
+        self.residual = nn.ModuleList([Residual(dropout),
+                                       Residual(dropout),
+                                       Residual(dropout)])
+    
+    def forward(self, x, encOut, srcMask, tgtMask):
+        
+        x1 = self.selfAttention(q=x,k=x,v=x, mask=tgtMask)
+        x = self.residual[0](x, x1)
+        
+        x1 = self.crossAttention(q=x,k=encOut,v=encOut, mask=srcMask)
+        x = self.residual[1](x,x1)
+        
+        x1 = self.feedForward(x)
+        x = self.residual[2](x,x1)
+        
+        return x
+        
+class Encoder(nn.Module):
+    
+    def __init__(self, layers: nn.ModuleList):
+        super().__init__()
+        self.layers = layers
+        self.norm = LayerNorm()
+    
+    def forward(self,x,mask):
+        #loop by the n number of encoder blocks
+        for layer in self.layers:
+            x = layer(x, mask)
+        return self.norm(x)
+        
+
+class Decoder(nn.Module):
+    
+    def __init__(self, layers: nn.ModuleList):
+        super().__init__()
+        self.layers = layers
+        self.norm = LayerNorm()
+    
+    def forward(self,x,encOut,srcMask,tgtMask):
+        #loop by the n number of encoder blocks
+        for layer in self.layers:
+            x = layer(x, encOut, srcMask, tgtMask)
+        return self.norm(x)        
+    
+class LastLayer(nn.Module):
+    
+    def __init__(self, dModel: int, vocabSize: int):
+        super().__init__()
+        self.lin = nn.Linear(dModel, vocabSize)
+    
+    def forward(self,x):
+        return torch.log_softmax(self.lin(x), dim=-1)
+        
+class Transformer(nn.Module):
+    
+    def __init__(self, encoder: Encoder, decoder: Decoder, srcEmb: InputEmbeddings,
+                 tgtEmb: InputEmbeddings, srcPos: PositionalEncoding,
+                 tgtPos: PositionalEncoding, lastLayer: LastLayer):
+        super().__init__()        
+        self.encoder = encoder
+        self.decoder = decoder
+        self.srcEmb = srcEmb
+        self.tgtEmb = tgtEmb
+        self.srcPos = srcPos
+        self.tgtPos = tgtPos
+        self.lastLayer = lastLayer
+        
+    def encode(self, x, srcMask):
+        x = self.srcEmb(x)
+        x = self.srcPos(x)
+        x = self.encode(x, srcMask)
+        return x
+    
+    def decode(self, x, encOut, srcMask, tgtMask):
+        x = self.tgtEmb(x)
+        x = self.tgtPos(x)
+        x = self.decode(x, encOut, srcMask, tgtMask)
+        return x
+    
+    def lastLL(self, x):
+        return self.lastLayer(x)
     
     
+def initTransformer(srcVsize: int, tgtVsize: int, srcSeqLen: int, tgtSeqLen: int,
+                    dModel: int=512, layers: int=6, numheads: int=8, dropout: float=0.1,
+                    hidSize: int=2048):
+    
+    srcEmb = InputEmbeddings(dModel, srcVsize)
+    tgtEmb = InputEmbeddings(dModel, tgtVsize)
+    srcPos = PositionalEncoding(dModel, srcSeqLen, dropout)
+    tgtPos = PositionalEncoding(dModel, tgtSeqLen, dropout)
+    
+    encBlocks,decBlocks=[],[]
+    for _ in range(layers):
         
+        #encoders
+        selfAttention = MultiHeadAttentionBlock(dModel, numheads, dropout)
+        feedForward = FeedForwardBlock(dModel, hidSize, dropout)
+        encBlock = EncoderBlock(selfAttention, feedForward, dropout)
+        encBlocks.append(encBlock)
         
+        #decoders
+        selfAttention = MultiHeadAttentionBlock(dModel, numheads, dropout)
+        crossAttention = MultiHeadAttentionBlock(dModel, numheads, dropout)
+        feedForward = FeedForwardBlock(dModel, hidSize, dropout)
+        decBlock = DecodeBlock(selfAttention, crossAttention, feedForward, dropout)
+        decBlocks.append(decBlock)
         
-        
-        
-        
-        
-        
-        
-        
+    #build the complete encoder and decoder
+    encoder = Encoder(nn.ModuleList(encBlocks))
+    decoder = Decoder(nn.ModuleList(decBlocks))
+    lastLayer = LastLayer(dModel, tgtVsize)
+    
+    #build the transformer
+    transformer = Transformer(encoder, decoder, srcEmb, tgtEmb, srcPos, tgtPos, lastLayer)
+    
+    #initialize weights
+    for param in transformer.parameters():
+        if param.dim() > 1:
+            nn.init.xavier_uniform_(param)
+            
+    return transformer
         
         
         
