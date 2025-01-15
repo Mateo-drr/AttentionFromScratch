@@ -28,7 +28,7 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.dModel = dModel
         self.seqLen = seqLen #size of sentence
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
         
         posEnc = torch.zeros(seqLen, dModel) 
         
@@ -132,8 +132,9 @@ class MultiHeadAttentionBlock(nn.Module):
         
         x, self.attentionScores = self.attentionCalc(query, key, value, mask)
         
-        x = x.transpose(1,2) #go to shape [b,seqlen,numheads,dk]
-        x = x.view(x.shape[0], -1, self.h * self.dk) # now to [b, seqlen, dmodel] 
+        x = x.transpose(1,2) #from [b,numheads,seqlen,dk] to shape [b,seqlen,numheads,dk]
+        x = x.reshape(x.shape[0], -1, self.numheads * self.dk) # now to [b, seqlen, dmodel] 
+        #view has some memory issue here so using reshape
         
         x = self.wo(x) #no change in shape
         
@@ -165,6 +166,8 @@ class EncoderBlock(nn.Module):
         
         x1 = self.feedForward(x)
         x = self.residual[1](x,x1)
+        
+        return x
         
 class DecodeBlock(nn.Module):
 
@@ -246,13 +249,13 @@ class Transformer(nn.Module):
     def encode(self, x, srcMask):
         x = self.srcEmb(x)
         x = self.srcPos(x)
-        x = self.encode(x, srcMask)
+        x = self.encoder(x, srcMask)
         return x
     
     def decode(self, x, encOut, srcMask, tgtMask):
         x = self.tgtEmb(x)
         x = self.tgtPos(x)
-        x = self.decode(x, encOut, srcMask, tgtMask)
+        x = self.decoder(x, encOut, srcMask, tgtMask)
         return x
     
     def lastLL(self, x):

@@ -13,15 +13,15 @@ class CustomDataset(Dataset):
     def __init__(self, data, tokenizerSrc, tokenizerTgt, srcLang, tgtLang, seqLen):
         super().__init__()
         self.data = data
-        self.tokenizerSrc
-        self.tokenizerTgt
-        self.srcLang
-        self.tgtLang
-        self.seqLen
+        self.tokenizerSrc = tokenizerSrc
+        self.tokenizerTgt = tokenizerTgt
+        self.srcLang = srcLang
+        self.tgtLang = tgtLang
+        self.seqLen = seqLen
         
-        self.bosToken = torch.Tensor([tokenizerSrc.token_to_id(['[BOS]'])], dtype=torch.int64)
-        self.eosToken = torch.Tensor([tokenizerSrc.token_to_id(['[EOS]'])], dtype=torch.int64)
-        self.padToken = torch.Tensor([tokenizerSrc.token_to_id(['[PAD]'])], dtype=torch.int64)
+        self.bosToken = torch.tensor([tokenizerSrc.token_to_id('[BOS]')], dtype=torch.int64)
+        self.eosToken = torch.tensor([tokenizerSrc.token_to_id('[EOS]')], dtype=torch.int64)
+        self.padToken = torch.tensor([tokenizerSrc.token_to_id('[PAD]')], dtype=torch.int64)
 
     def __len__(self):
     #JUST THE LENGTH OF THE DATASET
@@ -37,32 +37,39 @@ class CustomDataset(Dataset):
         encInput = self.tokenizerSrc.encode(srcTxt).ids
         decInput = self.tokenizerTgt.encode(tgtTxt).ids
 
-        encPad = self.seqLen - len(encInput) - 2
-        decPad = self.seqLen - len(decInput) - 2
+        encPad = self.seqLen - len(encInput) - 2 #both bos and eos
+        decPad = self.seqLen - len(decInput) - 1 #only one of both
 
         #check if seq len is enough
         if encPad < 0 or decPad < 0:
             raise ValueError('Not enough tokens: sentece is longer than limit')
             
         #add special tokens
-        encInput = torch.cat([self.bosToken, torch.tensor(encInput,dtype=torch.int64),
-                              self.eosToken, torch.tensor([self.padToken] * encPad, dtype=torch.int64)])
+        encInput = torch.cat([self.bosToken,
+                              torch.tensor(encInput,dtype=torch.int64),
+                              self.eosToken,
+                              torch.tensor([self.padToken] * encPad, dtype=torch.int64)])
         
-        decInput = torch.cat([self.bosToken, torch.tensor(decInput,dtype=torch.int64),
+        decInputT = torch.cat([self.bosToken,
+                              torch.tensor(decInput,dtype=torch.int64),
                               torch.tensor([self.padToken] * decPad, dtype=torch.int64)])
 
         label = torch.cat([torch.tensor(decInput,dtype=torch.int64),
-                           self.eosToken, torch.tensor([self.padToken] * decPad, dtype=torch.int64)])
+                           self.eosToken,
+                           torch.tensor([self.padToken] * decPad, dtype=torch.int64)])
 
         #all these 3 should have the seqLen
+        assert encInput.size(0) == self.seqLen
+        assert decInputT.size(0) == self.seqLen
+        assert label.size(0) == self.seqLen
         
         #the encoder mask only needs to mask pad tokens
         #the decoder mask needs to mask pad and future words
-        decMask = (decInput != self.padToken).unsqueeze(0).unsqueeze(0).int()
-        decMask = decMask & causalMask(decInput.size(0))
+        decMask = (decInputT != self.padToken).unsqueeze(0).unsqueeze(0).int()
+        decMask = decMask & causalMask(decInputT.size(0))
 
         return {'encInput': encInput, #[seqLen]
-                'decInput': decInput, #[seqLen]
+                'decInput': decInputT, #[seqLen]
                 'encMask': (encInput != self.padToken).unsqueeze(0).unsqueeze(0).int(),
                 'decMask': decMask,
                 'label':label,

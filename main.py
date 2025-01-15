@@ -30,7 +30,7 @@ def getSentences(ds, lang):
         yield item['translation'][lang]
 
 def makeTokenizer(config, ds, lang):
-    tokenizerPath = Path(config['tokenizer_file'].format(lang))
+    tokenizerPath = Path(config.tokenizer_file.format(lang))
     if not Path.exists(tokenizerPath):
         tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
         tokenizer.pre_tokenizer = Whitespace()
@@ -42,10 +42,10 @@ def makeTokenizer(config, ds, lang):
     return tokenizer
 
 def getDs(config):
-    dsRaw = load_dataset('opus_books', f'{config.lang_scr}-{config.lang_tgt}', split='train')
+    dsRaw = load_dataset('opus_books', f'{config.lang_src}-{config.lang_tgt}', split='train')
     
     #buildTKNZ
-    tokenizerSrc = makeTokenizer(config, dsRaw, config.lang_scr)
+    tokenizerSrc = makeTokenizer(config, dsRaw, config.lang_src)
     tokenizerTgt = makeTokenizer(config, dsRaw, config.lang_tgt)
     
     train_ds_size = int(0.9 * len(dsRaw))
@@ -62,20 +62,20 @@ def getDs(config):
     for item in dsRaw:
         srcId = tokenizerSrc.encode(item['translation'][config.lang_src]).ids
         tgtId = tokenizerTgt.encode(item['translation'][config.lang_tgt]).ids
-        srcMax = max(srcMax,srcId)
-        tgtMax = max(tgtMax,tgtId)
+        srcMax = max(srcMax,len(srcId))
+        tgtMax = max(tgtMax,len(tgtId))
         
     print('max lens', srcMax, tgtMax)
 
-    train_dl = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
-    valid_dl = DataLoader(valid_ds, batch_size=config.batch_size, shuffle=False)
+    train_dl = DataLoader(train_ds, batch_size=config.batch_size, pin_memory=True, shuffle=True)
+    valid_dl = DataLoader(valid_ds, batch_size=config.batch_size, pin_memory=True, shuffle=False)
     
     return train_dl, valid_dl, tokenizerSrc, tokenizerTgt
 
 
 configD = {
-    'batch_size': 8,
-    'num_epochs': 20,
+    'batch_size': 16,
+    'num_epochs': 10,
     'lr': 1e-4,
     'seq_len': 350,
     'd_model': 512,
@@ -86,6 +86,10 @@ configD = {
     'wb':True
     }
 config = SimpleNamespace(**configD)
+
+torch.set_num_threads(8)
+torch.set_num_interop_threads(8)
+torch.backends.cudnn.benchmark = True
 
 #get the dataset
 train_dl, valid_dl, tokenizerSrc, tokenizerTgt = getDs(config)
@@ -113,7 +117,7 @@ for epoch in range(config.num_epochs):
         encInput = data['encInput'].to(config.device) #[b, seqLen]
         decInput = data['decInput'].to(config.device) #[b. seqLen]
         encMask = data['encMask'].to(config.device) #[b, 1, 1, seqLen]
-        decMask = data['decMask'].to(config.decive) #[b, 1, seqLen, seqLen]
+        decMask = data['decMask'].to(config.device) #[b, 1, seqLen, seqLen]
         label = data['label'].to(config.device) #[b, seqlen]
         
         #run the model
@@ -122,10 +126,16 @@ for epoch in range(config.num_epochs):
         out = model.lastLL(decOut) #[b, seqlen, tgtVsize]
         
         #loss and param update
-        optimizer.zero_grad()    
-        loss = criterion(out, lbl)  # Compute loss
+        optimizer.zero_grad()  
+        #for some reason he changes shape of out to [b * seqlen, tgtVsize]
+        out = out.view(-1, tokenizerTgt.get_vocab_size())
+        label = label.view(-1) #and [b * seqlen]
+        loss = criterion(out, label)  # Compute loss
         loss.backward()             # Backward pass
         optimizer.step()        
+        
+        if config.wb:
+            wandb.log({"TLoss": loss})
 
         trainLoss += loss.item()
         
@@ -136,10 +146,22 @@ for epoch in range(config.num_epochs):
     with torch.no_grad():
         validLoss=0
         for data in tqdm(valid_dl, desc=f"Epoch {epoch+1}/{config.num_epochs}"):
-            lbl,inp = sample
-            out = model(sample)
             
-            loss = criterion(out, lbl)  # Compute loss       
+            encInput = data['encInput'].to(config.device) #[b, seqLen]
+            decInput = data['decInput'].to(config.device) #[b. seqLen]
+            encMask = data['encMask'].to(config.device) #[b, 1, 1, seqLen]
+            decMask = data['decMask'].to(config.device) #[b, 1, seqLen, seqLen]
+            label = data['label'].to(config.device) #[b, seqlen]
+            
+            #run the model
+            encOut = model.encode(encInput, encMask) #[b , seqlen, dmodel]
+            decOut = model.decode(decInput, encOut, encMask, decMask) # ''
+            out = model.lastLL(decOut) #[b, seqlen, tgtVsize]
+            
+            #for some reason he changes shape of out to [b * seqlen, tgtVsize]
+            out = out.view(-1, tokenizerTgt.get_vocab_size())
+            label = label.view(-1) #and [b * seqlen]
+            loss = criterion(out, label)  # Compute loss 
     
             validLoss += loss.item()
             
@@ -149,4 +171,5 @@ for epoch in range(config.num_epochs):
     if config.wb:
         wandb.log({"Validation Loss": avg_lossV, "Training Loss": avg_loss})
     
-    
+if config.wb:
+    wandb.finish()    
