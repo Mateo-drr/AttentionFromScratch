@@ -1,0 +1,1 @@
+{"TLoss": 3.6781530380249023, "_timestamp": 1737323367.898435, "_runtime": 30402.884791135788, "_step": 45499, "Validation Loss": 6.057287072900481, "Training Loss": 3.2729526465249754, "Greedy Vloss": 155.20217570662498, "_wandb": {"runtime": 30402}}

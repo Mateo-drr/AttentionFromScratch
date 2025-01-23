@@ -70,7 +70,7 @@ class FeedForwardBlock(nn.Module):
         self.lin1 = nn.Linear(dModel, hidSize)
         self.dropout = nn.Dropout(dropout)
         self.lin2 = nn.Linear(hidSize, dModel)
-        self.actfunc = nn.ReLU(inplace=True)
+        self.actfunc = nn.Mish(inplace=True)#nn.ReLU(inplace=True)
         
     def forward(self,x):
         #[b,seqlen,dmodel]
@@ -148,8 +148,10 @@ class Residual(nn.Module):
         self.norm = LayerNorm()
         
     def forward(self, x, prevLayerX):
-        #return x + self.dropout(self.norm(prevLayer(x))) #his implementation puts norm first
-        return x + self.dropout(self.norm(prevLayerX))
+        #return x + self.dropout(self.norm(prevLayer(x))) 
+        #his implementation puts norm first
+        return x + self.dropout(prevLayerX(self.norm(x)))
+        # return x + self.dropout(self.norm(prevLayerX))
     
 class EncoderBlock(nn.Module):
 
@@ -161,11 +163,15 @@ class EncoderBlock(nn.Module):
         
     def forward(self,x,srcMask):
         
-        x1 = self.selfAttention(q=x,k=x,v=x, mask=srcMask) #self attention
-        x = self.residual[0](x, x1)
+        # x1 = self.selfAttention(q=x,k=x,v=x, mask=srcMask) #self attention
+        # x = self.residual[0](x, x1)
         
-        x1 = self.feedForward(x)
-        x = self.residual[1](x,x1)
+        # x1 = self.feedForward(x)
+        # x = self.residual[1](x,x1)
+        
+        x = self.residual[0](x, lambda x: self.selfAttention(q=x,k=x,v=x, mask=srcMask))
+        
+        x = self.residual[1](x,self.feedForward)
         
         return x
         
@@ -185,14 +191,18 @@ class DecodeBlock(nn.Module):
     
     def forward(self, x, encOut, srcMask, tgtMask):
         
-        x1 = self.selfAttention(q=x,k=x,v=x, mask=tgtMask)
-        x = self.residual[0](x, x1)
+        # x1 = self.selfAttention(q=x,k=x,v=x, mask=tgtMask)
+        # x = self.residual[0](x, x1)
         
-        x1 = self.crossAttention(q=x,k=encOut,v=encOut, mask=srcMask)
-        x = self.residual[1](x,x1)
+        # x1 = self.crossAttention(q=x,k=encOut,v=encOut, mask=srcMask)
+        # x = self.residual[1](x,x1)
         
-        x1 = self.feedForward(x)
-        x = self.residual[2](x,x1)
+        # x1 = self.feedForward(x)
+        # x = self.residual[2](x,x1)
+        
+        x = self.residual[0](x, lambda x: self.selfAttention(q=x,k=x,v=x, mask=tgtMask))
+        x = self.residual[1](x, lambda x: self.crossAttention(q=x,k=encOut,v=encOut, mask=srcMask))
+        x = self.residual[2](x,self.feedForward)
         
         return x
         
