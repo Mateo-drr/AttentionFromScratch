@@ -72,6 +72,8 @@ class CustomDataset(Dataset):
                 'decInput': decInputT, #[seqLen]
                 'encMask': (encInput != self.padToken).unsqueeze(0).unsqueeze(0).int(),
                 'decMask': decMask,
+                'decPadMask': (decInputT != self.padToken).unsqueeze(0).unsqueeze(0).int(),
+                'decCauMask': causalMask(decInputT.size(0)),
                 'label':label,
                 'srcTxt': srcTxt,
                 'tgtTxt': tgtTxt

@@ -86,7 +86,7 @@ if True:
         'lang_tgt': 'it',
         'tokenizer_file': 'tokenizer_{0}.json',
         'device': 'cuda',
-        'wb':True
+        'wb':False
         }
     config = SimpleNamespace(**configD)
     
@@ -126,17 +126,21 @@ if True:
             encInput = data['encInput'].to(config.device) #[b, seqLen]
             decInput = data['decInput'].to(config.device) #[b. seqLen]
             encMask = data['encMask'].to(config.device) #[b, 1, 1, seqLen]
-            decMask = data['decMask'].to(config.device) #[b, 1, seqLen, seqLen]
+            decCauMask = data['decCauMask'].to(config.device) #[b,1,seqlen,seqlen]
+            decPadMask = data['decPadMask'].to(config.device) #[b, 1, 1, seqLen]
             label = data['label'].to(config.device) #[b, seqlen]
             
             #fix mask shapes for torch implementation
-            encMask,decMask = encMask.bool(), decMask.bool()
+            encMask,decCauMask,decPadMask = encMask.bool(), decCauMask.bool(), decPadMask.bool()
             encMask = encMask.squeeze(1).squeeze(1)
-            decMask = decMask.squeeze(1)
+            decCauMask = decCauMask[0].squeeze(1).squeeze(0) #just need a batchless mask, they are all the same
+            decPadMask = decPadMask.squeeze(1).squeeze(1)
             
             #run the model
             encOut = model.encode(encInput, encMask) #[b , seqlen, dmodel]
-            decOut = model.decode(decInput, encOut, encMask, decMask) # ''
+            decOut = model.decode(decInput, encOut, encMask,
+                                  tgtCauMask=decCauMask,
+                                  tgtPadMask=decPadMask) # ''
             out = model.lastLL(decOut) #[b, seqlen, tgtVsize]
             
             #loss and param update
@@ -153,8 +157,8 @@ if True:
     
             trainLoss += loss.item()
             k+=1
-            # if k== 5:
-            #     break
+            if k== 5:
+                break
             
         avg_loss = trainLoss / len(train_dl)    
         print(f'Epoch {epoch+1}, Loss: {avg_loss}')    
@@ -167,12 +171,13 @@ if True:
                 encInput = data['encInput'].to(config.device) #[b, seqLen]
                 #decInput = data['decInput'].to(config.device) #[b. seqLen]
                 encMask = data['encMask'].to(config.device) #[b, 1, 1, seqLen]
-                #decMask = data['decMask'].to(config.device) #[b, 1, seqLen, seqLen]
+                # decCauMask = data['decCauMask'].to(config.device) #[b, 1, seqLen, seqLen]
                 label = data['label'].to(config.device) #[b, seqlen]
                 
                 #fix mask shapes for torch implementation
-                encMask = encMask.bool()
+                encMask,decCauMask = encMask.bool(), decCauMask.bool()
                 encMask = encMask.squeeze(1).squeeze(1)
+                # decCauMask = decCauMask[0].squeeze(1).squeeze(0)
                 
                 #run greedy decoding i.e. the decoder input is empty and is filled progressively
                 bosT = tokenizerSrc.token_to_id('[BOS]')
@@ -180,7 +185,7 @@ if True:
                 encOut = model.encode(encInput, encMask)
                 
                 if validLoss==0: #run only one time
-                    model.eval()
+                    # model.eval()
                     results=[]
                     batchLoss=[]
                     #run this for each item in the batch
@@ -197,10 +202,13 @@ if True:
                             
                             #since there are no pad tokens in input mask is not needed
                             #torch handles the causal mask internally
-                            decMask=None
+                            decPadMask=None
+                            decCauMask = causalMask(decInput.shape[1]).squeeze(0).to(config.device) #remove batch
                             
                             #get the new token
-                            decOut = model.decode(decInput, sent, sentMask, decMask)
+                            decOut = model.decode(decInput, sent, sentMask,
+                                                  tgtCauMask=decCauMask,
+                                                  tgtPadMask=decPadMask)
                             out = model.lastLL(decOut[:,-1]) #use only the last token logits
                             
                             # Ground truth token at current token prediction position
@@ -227,18 +235,22 @@ if True:
                 encInput = data['encInput'].to(config.device) #[b, seqLen]
                 decInput = data['decInput'].to(config.device) #[b. seqLen]
                 encMask = data['encMask'].to(config.device) #[b, 1, 1, seqLen]
-                decMask = data['decMask'].to(config.device) #[b, 1, seqLen, seqLen]
+                decCauMask = data['decCauMask'].to(config.device) #[b,1,seqlen,seqlen]
+                decPadMask = data['decPadMask'].to(config.device) #[b, 1, 1, seqLen]
                 label = data['label'].to(config.device) #[b, seqlen]
                 
                 #fix mask shapes for torch implementation
-                encMask,decMask = encMask.bool(), decMask.bool()
+                encMask,decCauMask,decPadMask = encMask.bool(), decCauMask.bool(), decPadMask.bool()
                 encMask = encMask.squeeze(1).squeeze(1)
-                decMask = decMask.squeeze(1)
+                decCauMask = decCauMask[0].squeeze(1).squeeze(0) #just need a batchless mask, they are all the same
+                decPadMask = decPadMask.squeeze(1).squeeze(1)
                 
                 #run the model
-                model.train()
+                # model.train()
                 encOut = model.encode(encInput, encMask) #[b , seqlen, dmodel]
-                decOut = model.decode(decInput, encOut, encMask, decMask) # ''
+                decOut = model.decode(decInput, encOut, encMask,
+                                      tgtCauMask=decCauMask,
+                                      tgtPadMask=decPadMask) # ''
                 out = model.lastLL(decOut) #[b, seqlen, tgtVsize]
                 
                 #for some reason he changes shape of out to [b * seqlen, tgtVsize]
