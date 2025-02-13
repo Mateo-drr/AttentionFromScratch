@@ -64,14 +64,18 @@ class CustomDataset(Dataset):
         assert label.size(0) == self.seqLen
         
         #the encoder mask only needs to mask pad tokens
+        encMaskPad = (encInput != self.padToken).unsqueeze(0).unsqueeze(0).int()
         #the decoder mask needs to mask pad and future words
-        decMask = (decInputT != self.padToken).unsqueeze(0).unsqueeze(0).int()
-        decMask = decMask & causalMask(decInputT.size(0))
+        decMaskPad = (decInputT != self.padToken).unsqueeze(0).unsqueeze(0).int()
+        decMaskCau = causalMask(decInputT.size(0))
+        
+        
 
         return {'encInput': encInput, #[seqLen]
                 'decInput': decInputT, #[seqLen]
-                'encMask': (encInput != self.padToken).unsqueeze(0).unsqueeze(0).int(),
-                'decMask': decMask,
+                'encMaskPad': encMaskPad,
+                'decMaskPad': decMaskPad,
+                'decMaskCau': decMaskCau,
                 'label':label,
                 'srcTxt': srcTxt,
                 'tgtTxt': tgtTxt

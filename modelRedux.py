@@ -97,12 +97,20 @@ class TransformerRedux(nn.Module) :
         x = self.encoder(src=x, src_key_padding_mask=srcMask)
         return x
         
-    def decode(self, x, encOut, srcMask, tgtMask):
+    def decode(self, x, encOut, srcMask, tgtMaskCau, tgtMaskPad):
         x = self.tgtEmb(x)
         x = self.tgtPos(x)
         x = self.decoder(tgt=x,
                          memory=encOut,
-                         tgt_mask=tgtMask,
+                         
+                         #shape has to be either [tgtSeqLen, srcSeqLen]
+                         # or [b * numheads, tgtSeqLen, srcSeqLen]
+                         tgt_mask=tgtMaskCau, 
+                         
+                         #Shape has to be [b, seqLen]
+                         tgt_key_padding_mask= tgtMaskPad,
+                         
+                         #Shape has to be [b, seqLen]
                          memory_key_padding_mask=srcMask,
                          tgt_is_causal=True) #idk
         return x

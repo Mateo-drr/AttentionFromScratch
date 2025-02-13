@@ -68,18 +68,19 @@ def getDs(config):
         
     print('max lens', srcMax, tgtMax)
 
-    train_dl = DataLoader(train_ds, batch_size=config.batch_size, pin_memory=True, shuffle=True)#, num_workers=2)
+    train_dl = DataLoader(train_ds, batch_size=config.batch_size, pin_memory=True, shuffle=True, num_workers=4)
     valid_dl = DataLoader(valid_ds, batch_size=config.batch_size, pin_memory=True, shuffle=True)
     
     return train_dl, valid_dl, tokenizerSrc, tokenizerTgt
 
-# def main():
-if True:
+def main():
+# if True:
     
     configD = {
         'batch_size': 16,
         'num_epochs': 25,
-        'lr': 1e-3,
+        'lr': 1e-5,
+        'dropout':0.15,
         'seq_len': 350,
         'd_model': 512,
         'lang_src': 'en',
@@ -103,7 +104,8 @@ if True:
                              tgtVsize,
                              config.seq_len,
                              config.seq_len,
-                             config.d_model).to(config.device)
+                             config.d_model,
+                             dropout=config.dropout).to(config.device)
     
 
     # Define a loss function and optimizer
@@ -125,18 +127,22 @@ if True:
             
             encInput = data['encInput'].to(config.device) #[b, seqLen]
             decInput = data['decInput'].to(config.device) #[b. seqLen]
-            encMask = data['encMask'].to(config.device) #[b, 1, 1, seqLen]
-            decMask = data['decMask'].to(config.device) #[b, 1, seqLen, seqLen]
+            encMask = data['encMaskPad'].to(config.device) #[b, 1, 1, seqLen]
+            decMaskPad = data['decMaskPad'].to(config.device) #[b, 1, 1, seqLen]
+            decMaskCau = data['decMaskCau'].to(config.device) #[b, 1, seqLen, seqLen]
             label = data['label'].to(config.device) #[b, seqlen]
             
             #fix mask shapes for torch implementation
-            encMask,decMask = encMask.bool(), decMask.bool()
+            #flip masks as torch uses True = masked token
+            #use ~ to flip them
+            encMask,decMaskPad,decMaskCau = ~encMask.bool(), ~decMaskPad.bool(),~decMaskCau.bool()
             encMask = encMask.squeeze(1).squeeze(1)
-            decMask = decMask.squeeze(1)
+            decMaskPad = decMaskPad.squeeze(1).squeeze(1)
+            decMaskCau = decMaskCau.squeeze(1)[0] #[seqlen,seqlen]
             
             #run the model
             encOut = model.encode(encInput, encMask) #[b , seqlen, dmodel]
-            decOut = model.decode(decInput, encOut, encMask, decMask) # ''
+            decOut = model.decode(decInput, encOut, encMask, decMaskCau, decMaskPad) # ''
             out = model.lastLL(decOut) #[b, seqlen, tgtVsize]
             
             #loss and param update
@@ -152,7 +158,7 @@ if True:
                 wandb.log({"TLoss": loss})
     
             trainLoss += loss.item()
-            k+=1
+            # k+=1
             # if k== 5:
             #     break
             
@@ -164,14 +170,15 @@ if True:
             validLoss=0
             for data in tqdm(valid_dl, desc=f"Epoch {epoch+1}/{config.num_epochs}"):
                 
+                # '''
                 encInput = data['encInput'].to(config.device) #[b, seqLen]
                 #decInput = data['decInput'].to(config.device) #[b. seqLen]
-                encMask = data['encMask'].to(config.device) #[b, 1, 1, seqLen]
+                encMask = data['encMaskPad'].to(config.device) #[b, 1, 1, seqLen]
                 #decMask = data['decMask'].to(config.device) #[b, 1, seqLen, seqLen]
                 label = data['label'].to(config.device) #[b, seqlen]
                 
                 #fix mask shapes for torch implementation
-                encMask = encMask.bool()
+                encMask = ~encMask.bool()
                 encMask = encMask.squeeze(1).squeeze(1)
                 
                 #run greedy decoding i.e. the decoder input is empty and is filled progressively
@@ -180,7 +187,7 @@ if True:
                 encOut = model.encode(encInput, encMask)
                 
                 if validLoss==0: #run only one time
-                    model.eval()
+                    # model.eval()
                     results=[]
                     batchLoss=[]
                     #run this for each item in the batch
@@ -196,11 +203,14 @@ if True:
                         while True:
                             
                             #since there are no pad tokens in input mask is not needed
-                            #torch handles the causal mask internally
-                            decMask=None
+                            decMaskPad=None
+                            #torch handles the causal mask internally (?)
+                            decMaskCau=None
+                            #decMaskCau=torch.triu(torch.ones(decInput.shape[1], encOut.shape[1]), diagonal=1).type(torch.int)
+                            #decMaskCau = decMaskCau != 0
                             
                             #get the new token
-                            decOut = model.decode(decInput, sent, sentMask, decMask)
+                            decOut = model.decode(decInput, sent, sentMask, decMaskCau, decMaskPad)
                             out = model.lastLL(decOut[:,-1]) #use only the last token logits
                             
                             # Ground truth token at current token prediction position
@@ -223,22 +233,27 @@ if True:
                     print('\nGreedy Loss:', np.mean(batchLoss))
                     print(f'S{i}:',tokenizerTgt.decode(decInput.squeeze(0).detach().cpu().numpy()))
                     print('Targ:',tokenizerTgt.decode(label[i].detach().cpu().numpy()))
-                            
+                # '''
+                    
                 encInput = data['encInput'].to(config.device) #[b, seqLen]
                 decInput = data['decInput'].to(config.device) #[b. seqLen]
-                encMask = data['encMask'].to(config.device) #[b, 1, 1, seqLen]
-                decMask = data['decMask'].to(config.device) #[b, 1, seqLen, seqLen]
+                encMask = data['encMaskPad'].to(config.device) #[b, 1, 1, seqLen]
+                decMaskPad = data['decMaskPad'].to(config.device) #[b, 1, 1, seqLen]
+                decMaskCau = data['decMaskCau'].to(config.device) #[b, 1, seqLen, seqLen]
                 label = data['label'].to(config.device) #[b, seqlen]
                 
                 #fix mask shapes for torch implementation
-                encMask,decMask = encMask.bool(), decMask.bool()
+                #flip masks as torch uses True = masked token
+                #use ~ to flip them
+                encMask,decMaskPad,decMaskCau = ~encMask.bool(), ~decMaskPad.bool(),~decMaskCau.bool()
                 encMask = encMask.squeeze(1).squeeze(1)
-                decMask = decMask.squeeze(1)
+                decMaskPad = decMaskPad.squeeze(1).squeeze(1)
+                decMaskCau = decMaskCau.squeeze(1)[0] #[seqlen,seqlen]
                 
                 #run the model
-                model.train()
+                # model.train()
                 encOut = model.encode(encInput, encMask) #[b , seqlen, dmodel]
-                decOut = model.decode(decInput, encOut, encMask, decMask) # ''
+                decOut = model.decode(decInput, encOut, encMask, decMaskCau, decMaskPad) # ''
                 out = model.lastLL(decOut) #[b, seqlen, tgtVsize]
                 
                 #for some reason he changes shape of out to [b * seqlen, tgtVsize]
@@ -257,7 +272,7 @@ if True:
     if config.wb:
         wandb.finish()    
 
-'''
+# '''
 if __name__ == "__main__":
     main()
 #'''
