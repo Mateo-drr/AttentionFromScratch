@@ -9,34 +9,6 @@ import torch
 import torch.nn as nn
 import math
 
-def best_patch_split(H, W, num_patches):
-    best_pair = None
-    best_ratio_diff = float('inf')
-    
-    for h in range(1, num_patches + 1):
-        if num_patches % h != 0:
-            continue
-        w = num_patches // h
-        
-        # Check if this configuration produces integer-sized patches
-        patch_H = H / h
-        patch_W = W / w
-        
-        # Skip configurations that don't produce integer dimensions
-        if not (patch_H.is_integer() and patch_W.is_integer()):
-            continue
-        
-        # Calculate how far the ratio is from 1:1 (perfect square)
-        ratio = patch_W / patch_H
-        ratio_diff = abs(ratio - 1)
-        
-        if ratio_diff < best_ratio_diff:
-            best_ratio_diff = ratio_diff
-            best_pair = (h, w)
-    
-    assert best_pair is not None, 'image cant be chunked into given number of patches'
-    return best_pair
-
 class PositionalEncoding(nn.Module):
     
     def __init__(self, dModel: int, seqLen: int, dropout: float):
@@ -127,46 +99,180 @@ class MultiHeadAttentionBlock(nn.Module):
         
         return x
     
-class tinyViT(nn.Module):
-    
-    def __init__(self, dModel, numheads, dropout=0.1, numChunks=9):
+class ViTBlock(nn.Module):
+    def __init__(self, dModel, numheads, dropout, hidSize):
         super().__init__()
-        
-        self.hstep,self.wstep=None,None
-        self.numChunks=numChunks
         
         self.attention = MultiHeadAttentionBlock(dModel, numheads, dropout)
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm()
-        self.ff = nn.Linear(dModel)
+        self.norm = nn.LayerNorm(dModel)
+        self.ff = nn.Sequential(nn.Linear(dModel, hidSize),
+                                nn.Mish(inplace=True),
+                                nn.Linear(hidSize, dModel)
+                                )
+        self.m = nn.Mish(inplace=True)
+        
+    def forward(self,x):
+        
+        x1 = self.attention(q=x, k=x, v=x, mask=None)
+        x = x + self.dropout(self.norm(x1))
+        x1 = self.ff(x)
+        x = x + self.dropout(self.norm(x1))
+        
+        return x
+    
+class tinyViT(nn.Module):
+    
+    def __init__(self, dModel, numheads, hidSize=1024, dropout=0.1, layers=1,
+                 numChunks=16, chunkSize=7, stepSize=4, numChan=1, numClasses=10):
+        super().__init__()
+        
+        self.hstep,self.wstep=stepSize,stepSize
+        self.numChunks=numChunks
+        self.chunkSize=chunkSize
+        self.dModel=dModel
+        
+        self.chunkProj = nn.Linear(numChan*chunkSize*chunkSize, dModel)
+        self.posEnc = PositionalEncoding(dModel, self.numChunks+1, dropout)
+        
+        self.attention = MultiHeadAttentionBlock(dModel, numheads, dropout)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(dModel)
+        self.ff = nn.Sequential(nn.Linear(dModel, hidSize),
+                                nn.Mish(inplace=True),
+                                nn.Linear(hidSize, dModel)
+                                )
+        self.m = nn.Mish(inplace=True)
+        
+        self.decoders = nn.ModuleList([
+            ViTBlock(dModel, numheads, dropout, hidSize) for _ in range(layers)])
+        
+        self.classifier = nn.Linear(dModel, numClasses) 
+        
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, dModel))
+        
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        print('Weights initialized')
+        for param in self.parameters():
+            if param.dim() > 1:  
+                nn.init.xavier_normal_(param)
+                # nn.init.kaiming_normal_(param, mode='fan_out', nonlinearity='leaky_relu')
+        
+    def forward(self, x):
+        
+        B,C,H,W = x.shape
+        #chop first the columns and then the rows
+        patches = x.unfold(2, self.chunkSize, self.chunkSize) 
+        #[b,c, stepsize, w, chunkSize]
+        patches = patches.unfold(3, self.chunkSize, self.chunkSize) 
+        #[b, c, stepsize, stepsize, chunksize, chunksize]
+        
+        #now to reshape we need to reorder the tensor
+        patches = patches.permute(0,2,3,1,4,5)
+        patches = patches.contiguous().view(B, self.numChunks, C * self.chunkSize * self.chunkSize)
+        #[b, numchunks, c * chunksize * chunksize]
+        
+        x = self.chunkProj(patches)
+        
+        # Add CLS token
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, dModel]
+        x = torch.cat((cls_tokens, x), dim=1)  # [B, numChunks + 1, dModel]
+        
+        x = self.posEnc(x)
+        
+        # x1 = self.attention(q=x, k=x, v=x, mask=None)
+        
+        # x = x + self.dropout(self.norm(x1))
+    
+        # x1 = self.ff(x)
+        
+        # x = x + self.dropout(self.norm(x1))
+        
+        for decoder in self.decoders:
+            x = decoder(x)
+        
+        # x = self.m(x)
+        x = self.classifier(x[:,0,:]) #only cls
+    
+        return x
+    
+    
+class pxVIT(nn.Module):
+    
+    def __init__(self, dModel, numheads, hidSize=1024, dropout=0.1, layers=1,
+                 numChunks=16, chunkSize=7, stepSize=4, numChan=1, numClasses=10):
+        super().__init__()
+        
+        self.hstep,self.wstep=stepSize,stepSize
+        self.numChunks=numChunks
+        
+        self.dModel=dModel
+        
+        self.px = nn.PixelUnshuffle(chunkSize)
+        
+        self.chunkProj = nn.Linear(numChan*chunkSize*chunkSize, dModel)
+        self.posEnc = PositionalEncoding(dModel, numChunks+1, dropout)
+        
+        self.attention = MultiHeadAttentionBlock(dModel, numheads, dropout)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(dModel)
+        self.ff = nn.Sequential(nn.Linear(dModel, hidSize),
+                                nn.Mish(inplace=True),
+                                nn.Linear(hidSize, dModel)
+                                )
+        self.m = nn.Mish(inplace=True)
+        
+        self.decoders = nn.ModuleList([
+            ViTBlock(dModel, numheads, dropout, hidSize) for _ in range(layers)])
+        
+        self.classifier = nn.Linear(dModel, numClasses) 
+        
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, dModel))
+        
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        print('Weights initialized')
+        for param in self.parameters():
+            if param.dim() > 1:  
+                nn.init.xavier_normal_(param)
+                # nn.init.kaiming_normal_(param, mode='fan_out', nonlinearity='leaky_relu')
         
     def forward(self, x):
         
         B,C,H,W = x.shape
         
-        #TODO add training check
-        if self.hstep is None and self.wstep is None:
-            self.hstep,self.wstep = best_patch_split(H, W, self.numChunks)
+        x = self.px(x)
         
-        x = x.unfold(dim=2, )
+        #go from [b,c*size^2, h/size, w/size] to [b,c*size^2, h/size * w/size] and then 
+        #flip channels with the data
+        xflat = x.flatten(2).transpose(1,2) 
         
-        x1 = self.attention(q=x, k=x, v=x, mask=None)
+        x = self.chunkProj(xflat)
         
-        x = x + self.dropout(self.norm(x1))
-    
-        x1 = self.ff(x)
+        # Add CLS token
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, dModel]
+        x = torch.cat((cls_tokens, x), dim=1)  # [B, numChunks + 1, dModel]
         
-        x = x + self.dropout(self.norm(x1))
+        x = self.posEnc(x)
+                
+        # x1 = self.attention(q=x, k=x, v=x, mask=None)
+        
+        # x = x + self.dropout(self.norm(x1))
     
-        return x
+        # x1 = self.ff(x)
+        
+        # x = x + self.dropout(self.norm(x1))
+        
+        for decoder in self.decoders:
+            x = decoder(x)
+        
+        # x = self.m(x)
+        x = self.classifier(x[:,0,:]) #only cls
     
-    
-    
-    
-    
-    
-    
-    
+        return x    
     
     
     

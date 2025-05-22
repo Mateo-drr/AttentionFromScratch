@@ -7,3 +7,9 @@ ros2Packages/*
 
 # Ignore wandb
 **/wandb/
+
+# Ignore data folder with datasets
+**/data/
+
+# Ignore trained weights
+**/weights/
